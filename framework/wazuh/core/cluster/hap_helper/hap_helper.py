@@ -3,10 +3,9 @@ import time
 from asyncio import sleep
 from math import ceil, floor
 
-from wazuh.core.cluster.hap_helper.configuration import parse_configuration
 from wazuh.core.cluster.hap_helper.proxy import Proxy, ProxyAPI, ProxyServerState
 from wazuh.core.cluster.hap_helper.wazuh import WazuhAgent, WazuhDAPI
-from wazuh.core.cluster.utils import ClusterFilter, context_tag
+from wazuh.core.cluster.utils import ClusterFilter, context_tag, read_cluster_config
 from wazuh.core.exception import WazuhException, WazuhHAPHelperError
 
 
@@ -17,18 +16,29 @@ class HAPHelper:
     AGENT_STATUS_SYNC_TIME: int = 25  # Default agent notify time + cluster sync + 5s
     SERVER_ADMIN_STATE_DELAY: int = 5
 
-    def __init__(self, proxy: Proxy, wazuh_dapi: WazuhDAPI, tag: str, options: dict):
+    def __init__(
+        self,
+        proxy: Proxy,
+        wazuh_dapi: WazuhDAPI,
+        tag: str,
+        sleep_time: float,
+        agent_reconnection_stability_time: int,
+        agent_reconnection_time: int,
+        agent_reconnection_chunk_size: int,
+        agent_tolerance: float,
+        remove_disconnected_node_after: int,
+    ):
         self.tag = tag
         self.logger = self._get_logger(self.tag)
         self.proxy = proxy
         self.wazuh_dapi = wazuh_dapi
 
-        self.sleep_time: int = options['sleep_time']
-        self.agent_reconnection_stability_time: int = options['agent_reconnection_stability_time']
-        self.agent_reconnection_chunk_size: int = options['agent_reconnection_chunk_size']
-        self.agent_reconnection_time: int = options['agent_reconnection_time']
-        self.agent_tolerance: float = options['agent_tolerance']
-        self.remove_disconnected_node_after: int = options['remove_disconnected_node_after']
+        self.sleep_time = sleep_time
+        self.agent_reconnection_stability_time = agent_reconnection_stability_time
+        self.agent_reconnection_chunk_size = agent_reconnection_chunk_size
+        self.agent_reconnection_time = agent_reconnection_time
+        self.agent_tolerance = agent_tolerance
+        self.remove_disconnected_node_after = remove_disconnected_node_after
 
     @staticmethod
     def _get_logger(tag: str) -> logging.Logger:
@@ -413,29 +423,40 @@ class HAPHelper:
         """Initialize and run HAPHelper."""
 
         try:
-            configuration = parse_configuration()
+            configuration = read_cluster_config()['haproxy_helper']
             tag = 'HAPHelper'
 
             proxy_api = ProxyAPI(
-                username=configuration['proxy']['api']['user'],
-                password=configuration['proxy']['api']['password'],
+                username=configuration['haproxy_user'],
+                password=configuration['haproxy_password'],
                 tag=tag,
-                address=configuration['proxy']['api']['address'],
-                port=configuration['proxy']['api']['port'],
+                address=configuration['haproxy_address'],
+                port=configuration['haproxy_port'],
             )
             proxy = Proxy(
-                wazuh_backend=configuration['proxy']['backend'],
-                wazuh_connection_port=configuration['wazuh']['connection']['port'],
+                wazuh_backend=configuration.get('proxy_backend', 'wazuh_cluster'),  # OPTIONAL
+                wazuh_connection_port=configuration.get('wazuh_api_port', '55000'),  # OPTIONAL
                 proxy_api=proxy_api,
                 tag=tag,
-                resolver=configuration['proxy'].get('resolver', None),
+                resolver=configuration.get('proxy_resolver', None),  # OPTIONAL
             )
 
             wazuh_dapi = WazuhDAPI(
-                tag=tag, excluded_nodes=configuration['wazuh']['excluded_nodes'],
+                tag=tag,
+                excluded_nodes=configuration.get('excluded_nodes', []),
             )
 
-            helper = cls(proxy=proxy, wazuh_dapi=wazuh_dapi, tag=tag, options=configuration['hap_helper'])
+            helper = cls(
+                proxy=proxy,
+                wazuh_dapi=wazuh_dapi,
+                tag=tag,
+                sleep_time=configuration['frequency'],
+                agent_reconnection_stability_time=configuration['agent_reconnection_stability_time'],
+                agent_reconnection_time=configuration['agent_reconnection_time'],
+                agent_reconnection_chunk_size=configuration['agent_chunk_size'],
+                agent_tolerance=configuration['imbalance_tolerance'],
+                remove_disconnected_node_after=configuration['remove_disconnected_node_after'],
+            )
 
             await helper.initialize_proxy()
             await helper.initialize_wazuh_cluster_configuration()
